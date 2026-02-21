@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Week 1 WebRTC Smoke Test</title>
+    <style>
+      body { font-family: sans-serif; margin: 16px; }
+      .row { display: flex; gap: 16px; margin-top: 12px; }
+      video { width: 45vw; max-width: 560px; background: #111; border-radius: 8px; }
+      input, button { margin-right: 8px; }
+      #log { white-space: pre-wrap; font-size: 13px; background: #f5f5f5; padding: 10px; border-radius: 8px; }
+    </style>
+  </head>
+  <body>
+    <h2>Week 1: Signaling + Basic WebRTC</h2>
+    <p>Open this page in two tabs with different peer IDs.</p>
+
+    <label>Session: <input id="sessionId" value="demo-room" /></label>
+    <label>Peer: <input id="peerId" value="" /></label>
+    <button id="connectBtn">Connect</button>
+    <button id="callBtn" disabled>Call first remote peer</button>
+
+    <div class="row">
+      <div>
+        <h4>Local</h4>
+        <video id="localVideo" autoplay muted playsinline></video>
+      </div>
+      <div>
+        <h4>Remote</h4>
+        <video id="remoteVideo" autoplay playsinline></video>
+      </div>
+    </div>
+
+    <h4>Log</h4>
+    <div id="log"></div>
+
+    <script>
+      const logEl = document.getElementById("log");
+      const localVideo = document.getElementById("localVideo");
+      const remoteVideo = document.getElementById("remoteVideo");
+      const connectBtn = document.getElementById("connectBtn");
+      const callBtn = document.getElementById("callBtn");
+      const sessionInput = document.getElementById("sessionId");
+      const peerInput = document.getElementById("peerId");
+
+      let pc;
+      let localStream;
+      let localPeerId;
+      let currentSessionId;
+      let pollTimer;
+      const knownPeers = new Set();
+      const pendingIce = [];
+
+      const rtcConfig = {
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+      };
+
+      function log(message) {
+        const now = new Date().toISOString().slice(11, 19);
+        logEl.textContent += `[${now}] ${message}\n`;
+      }
+
+      function randomId() {
+        return Math.random().toString(36).slice(2, 8);
+      }
+
+      async function initPeerConnection() {
+        pc = new RTCPeerConnection(rtcConfig);
+        const remoteStream = new MediaStream();
+        remoteVideo.srcObject = remoteStream;
+
+        pc.onicecandidate = (event) => {
+          if (!event.candidate) return;
+          if (knownPeers.size === 0) return;
+          const to = Array.from(knownPeers)[0];
+          postSignal("/signal/ice_candidate", {
+            type: "ice_candidate",
+            from: localPeerId,
+            to,
+            candidate: JSON.stringify(event.candidate)
+          });
+        };
+
+        pc.ontrack = (event) => {
+          event.streams[0].getTracks().forEach((t) => remoteStream.addTrack(t));
+          log("Remote track received");
+        };
+        
+        pc.onconnectionstatechange = () => {
+          log(`PeerConnection state: ${pc.connectionState}`);
+        };
+
+        localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
+      }
+
+      function postSignal(endpoint, payload) {
+        return fetch(`${endpoint}?session_id=${encodeURIComponent(currentSessionId)}&peer_id=${encodeURIComponent(localPeerId)}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+      }
+
+      async function pollSignals() {
+        const response = await fetch(`/signal/poll?session_id=${encodeURIComponent(currentSessionId)}&peer_id=${encodeURIComponent(localPeerId)}`);
+        const messages = await response.json();
+        for (const msg of messages) {
+          await handleSignal(msg);
+        }
+      }
+
+      async function handleSignal(msg) {
+        if (msg.type === "join" && msg.peer_id !== localPeerId) {
+          knownPeers.add(msg.peer_id);
+          log(`Peer joined: ${msg.peer_id}`);
+          return;
+        }
+        if (msg.type === "leave") {
+          knownPeers.delete(msg.peer_id);
+          log(`Peer left: ${msg.peer_id}`);
+          return;
+        }
+        if (msg.type === "offer" && msg.to === localPeerId) {
+          knownPeers.add(msg.from);
+          await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          await postSignal("/signal/answer", { type: "answer", from: localPeerId, to: msg.from, sdp: answer.sdp });
+          log(`Answer sent to ${msg.from}`);
+          while (pendingIce.length) {
+            const ice = pendingIce.shift();
+            await pc.addIceCandidate(ice);
+          }
+          return;
+        }
+        if (msg.type === "answer" && msg.to === localPeerId) {
+          await pc.setRemoteDescription({ type: "answer", sdp: msg.sdp });
+          log(`Answer received from ${msg.from}`);
+          return;
+        }
+        if (msg.type === "ice_candidate" && msg.to === localPeerId) {
+          const candidate = new RTCIceCandidate(JSON.parse(msg.candidate));
+          if (!pc.remoteDescription) {
+            pendingIce.push(candidate);
+            return;
+          }
+          await pc.addIceCandidate(candidate);
+        }
+      }
+
+      async function startCall() {
+        const target = Array.from(knownPeers)[0];
+        if (!target) {
+          log("No remote peer found");
+          return;
+        }
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await postSignal("/signal/offer", {
+          type: "offer",
+          from: localPeerId,
+          to: target,
+          sdp: offer.sdp
+        });
+        log(`Offer sent to ${target}`);
+      }
+
+      async function ensureLocalMedia() {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        localVideo.srcObject = localStream;
+        log("Local camera stream ready");
+      }
+
+      connectBtn.onclick = async () => {
+        try {
+          connectBtn.disabled = true;
+          callBtn.disabled = true;
+          log("Connecting...");
+
+          localPeerId = peerInput.value.trim() || randomId();
+          peerInput.value = localPeerId;
+          currentSessionId = sessionInput.value.trim() || "demo-room";
+
+          await ensureLocalMedia();
+          await initPeerConnection();
+
+          const joinResponse = await fetch(`/signal/join?session_id=${encodeURIComponent(currentSessionId)}&peer_id=${encodeURIComponent(localPeerId)}`, {
+            method: "POST"
+          });
+          if (!joinResponse.ok) {
+            throw new Error(`Join failed with status ${joinResponse.status}`);
+          }
+
+          if (pollTimer) clearInterval(pollTimer);
+          pollTimer = setInterval(() => {
+            pollSignals().catch((err) => log(`Poll error: ${err.message}`));
+          }, 300);
+          log(`HTTP signaling connected as ${localPeerId}`);
+          callBtn.disabled = false;
+        } catch (err) {
+          log(`Connect failed: ${err.message}`);
+          console.error(err);
+        } finally {
+          connectBtn.disabled = false;
+        }
+      };
+
+      callBtn.onclick = async () => {
+        await startCall();
+      };
+
+      window.addEventListener("beforeunload", () => {
+        if (!localPeerId || !currentSessionId) return;
+        navigator.sendBeacon(
+          `/signal/leave?session_id=${encodeURIComponent(currentSessionId)}&peer_id=${encodeURIComponent(localPeerId)}`
+        );
+      });
+
+    </script>
+  </body>
+</html>

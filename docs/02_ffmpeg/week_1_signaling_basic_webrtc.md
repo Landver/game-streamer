@@ -6,7 +6,7 @@
 - No FFmpeg integration in this week.
 - Optimize for speed of delivery (PoC quality).
 
-## Deliverables
+## Deliverables 
 
 - Rust signaling server with `offer`, `answer`, `ice_candidate`, `join`, `leave`.
 - Browser test page that connects to signaling and establishes `RTCPeerConnection`.
