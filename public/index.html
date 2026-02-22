@@ -13,6 +13,11 @@
         max-height: 84vh;
         background: #111;
         border-radius: 8px;
+        outline: none;
+        cursor: crosshair;
+      }
+      #remoteVideo.armed {
+        box-shadow: 0 0 0 2px #2f80ed;
       }
       input, button { margin-right: 8px; }
       #log { white-space: pre-wrap; font-size: 13px; background: #f5f5f5; padding: 10px; border-radius: 8px; }
@@ -31,7 +36,7 @@
     <div class="row">
       <div>
         <h4>Remote</h4>
-        <video id="remoteVideo" autoplay playsinline></video>
+        <video id="remoteVideo" autoplay playsinline tabindex="0"></video>
       </div>
     </div>
 
@@ -53,6 +58,11 @@
       let pollTimer;
       const knownPeers = new Set();
       const pendingIce = [];
+      let inputDc = null;
+      let inputArmed = false;
+      let lastMoveSentAt = 0;
+      const pressedButtons = new Set();
+      const pressedKeys = new Set();
 
       const rtcConfig = {
         iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
@@ -71,6 +81,17 @@
         pc = new RTCPeerConnection(rtcConfig);
         const remoteStream = new MediaStream();
         remoteVideo.srcObject = remoteStream;
+        inputDc = null;
+        setInputArmed(false);
+
+        // Create the input channel from offerer side so SDP includes application m-line.
+        inputDc = pc.createDataChannel("input", { ordered: true });
+        inputDc.onopen = () => log("Input channel open");
+        inputDc.onclose = () => {
+          log("Input channel closed");
+          setInputArmed(false);
+        };
+        inputDc.onerror = () => log("Input channel error");
 
         pc.onicecandidate = (event) => {
           if (!event.candidate) return;
@@ -90,11 +111,78 @@
           event.streams[0].getTracks().forEach((t) => remoteStream.addTrack(t));
           log("Remote track received");
         };
+
+        pc.ondatachannel = (_event) => {};
         
         pc.onconnectionstatechange = () => {
           log(`PeerConnection state: ${pc.connectionState}`);
         };
         pc.addTransceiver("video", { direction: "recvonly" });
+      }
+
+      function setInputArmed(armed) {
+        inputArmed = armed;
+        remoteVideo.classList.toggle("armed", armed);
+        if (!armed) {
+          flushPressedInputs();
+        }
+        if (armed) {
+          remoteVideo.focus();
+          log("Input active");
+        }
+      }
+
+      function inputReady() {
+        return inputDc && inputDc.readyState === "open" && inputArmed;
+      }
+
+      function sendInput(payload) {
+        if (!inputReady()) return;
+        inputDc.send(JSON.stringify(payload));
+      }
+
+      function clamp01(value) {
+        return Math.max(0, Math.min(1, value));
+      }
+
+      function buttonName(button) {
+        if (button === 0) return "left";
+        if (button === 1) return "middle";
+        if (button === 2) return "right";
+        return null;
+      }
+
+      function flushPressedInputs() {
+        if (!inputDc || inputDc.readyState !== "open") {
+          pressedButtons.clear();
+          pressedKeys.clear();
+          return;
+        }
+        for (const button of pressedButtons) {
+          inputDc.send(JSON.stringify({ v: 1, kind: "mouse_up", button }));
+        }
+        for (const code of pressedKeys) {
+          inputDc.send(JSON.stringify({ v: 1, kind: "key_up", code }));
+        }
+        pressedButtons.clear();
+        pressedKeys.clear();
+      }
+
+      function sendMouseMoveFromEvent(event) {
+        if (!inputReady()) return;
+        const now = performance.now();
+        if (now - lastMoveSentAt < 16) return;
+        lastMoveSentAt = now;
+        const rect = remoteVideo.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return;
+        const xNorm = clamp01((event.clientX - rect.left) / rect.width);
+        const yNorm = clamp01((event.clientY - rect.top) / rect.height);
+        sendInput({ v: 1, kind: "mouse_move_abs", x_norm: xNorm, y_norm: yNorm });
+      }
+
+      function wheelDeltaToWindows(deltaY) {
+        if (deltaY === 0) return 0;
+        return deltaY > 0 ? -120 : 120;
       }
 
       function postSignal(endpoint, payload) {
@@ -225,6 +313,81 @@
         navigator.sendBeacon(
           `/signal/leave?session_id=${encodeURIComponent(currentSessionId)}&peer_id=${encodeURIComponent(localPeerId)}`
         );
+      });
+
+      remoteVideo.addEventListener("click", () => {
+        setInputArmed(true);
+      });
+
+      remoteVideo.addEventListener("contextmenu", (event) => {
+        if (inputArmed) event.preventDefault();
+      });
+
+      remoteVideo.addEventListener("mousemove", (event) => {
+        sendMouseMoveFromEvent(event);
+      });
+
+      remoteVideo.addEventListener("mousedown", (event) => {
+        const button = buttonName(event.button);
+        if (!button || !inputReady()) return;
+        event.preventDefault();
+        pressedButtons.add(button);
+        sendInput({ v: 1, kind: "mouse_down", button });
+      });
+
+      remoteVideo.addEventListener("mouseup", (event) => {
+        const button = buttonName(event.button);
+        if (!button || !inputReady()) return;
+        event.preventDefault();
+        pressedButtons.delete(button);
+        sendInput({ v: 1, kind: "mouse_up", button });
+      });
+
+      remoteVideo.addEventListener("wheel", (event) => {
+        if (!inputReady()) return;
+        event.preventDefault();
+        const delta = wheelDeltaToWindows(event.deltaY);
+        if (delta === 0) return;
+        sendInput({ v: 1, kind: "mouse_wheel", delta_y: delta });
+      }, { passive: false });
+
+      window.addEventListener("keydown", (event) => {
+        if (!inputReady() || document.activeElement !== remoteVideo) return;
+        event.preventDefault();
+        if (pressedKeys.has(event.code)) return;
+        pressedKeys.add(event.code);
+        sendInput({ v: 1, kind: "key_down", code: event.code });
+      });
+
+      window.addEventListener("keyup", (event) => {
+        if (!inputReady() || document.activeElement !== remoteVideo) return;
+        event.preventDefault();
+        pressedKeys.delete(event.code);
+        sendInput({ v: 1, kind: "key_up", code: event.code });
+      });
+
+      window.addEventListener("mousemove", (event) => {
+        // Keep drag/move active even when cursor leaves video bounds.
+        if (!inputArmed) return;
+        sendMouseMoveFromEvent(event);
+      });
+
+      window.addEventListener("mouseup", (event) => {
+        if (!inputArmed) return;
+        const button = buttonName(event.button);
+        if (!button || !pressedButtons.has(button)) return;
+        pressedButtons.delete(button);
+        sendInput({ v: 1, kind: "mouse_up", button });
+      });
+
+      window.addEventListener("blur", () => {
+        flushPressedInputs();
+      });
+
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState !== "visible") {
+          flushPressedInputs();
+        }
       });
 
     </script>

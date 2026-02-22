@@ -8,6 +8,7 @@ use tokio::{
 use tracing::{error, info, warn};
 use webrtc::{
     api::{media_engine::MediaEngine, APIBuilder},
+    data_channel::data_channel_message::DataChannelMessage,
     ice_transport::ice_candidate::RTCIceCandidateInit,
     media::Sample,
     peer_connection::{
@@ -18,7 +19,7 @@ use webrtc::{
     track::track_local::track_local_static_sample::TrackLocalStaticSample,
 };
 
-use crate::{models::SignalMessage, state::AppState};
+use crate::{input_injector, models::SignalMessage, state::AppState};
 
 const BOT_PEER_ID: &str = "ffmpeg-bot";
 
@@ -74,6 +75,31 @@ impl MediaBridge {
             .add_track(video_track.clone())
             .await
             .map_err(|err| format!("add_track failed: {err}"))?;
+
+        peer_connection.on_data_channel(Box::new(move |dc| {
+            Box::pin(async move {
+                if dc.label() != "input" {
+                    return;
+                }
+                dc.on_open(Box::new(|| {
+                    Box::pin(async move {
+                        info!("input_channel_open");
+                    })
+                }));
+                dc.on_message(Box::new(move |msg: DataChannelMessage| {
+                    Box::pin(async move {
+                        let Ok(text) = String::from_utf8(msg.data.to_vec()) else {
+                            warn!("input_event_ignored invalid_utf8");
+                            return;
+                        };
+                        match input_injector::inject_from_json(&text) {
+                            Ok(()) => info!("input_event_received"),
+                            Err(err) => warn!("input_event_failed error={err}"),
+                        }
+                    })
+                }));
+            })
+        }));
 
         tokio::spawn(async move {
             let mut rtcp = vec![0_u8; 1500];

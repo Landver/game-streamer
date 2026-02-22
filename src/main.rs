@@ -4,6 +4,7 @@ use tracing::info;
 
 mod app;
 mod handlers;
+mod input_injector;
 mod media_bridge;
 mod models;
 mod service;
