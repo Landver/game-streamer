@@ -3,29 +3,32 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Week 1 WebRTC Smoke Test</title>
+    <title>Week 3 FFmpeg to WebRTC Smoke Test</title>
     <style>
       body { font-family: sans-serif; margin: 16px; }
       .row { display: flex; gap: 16px; margin-top: 12px; }
-      video { width: 45vw; max-width: 560px; background: #111; border-radius: 8px; }
+      #remoteVideo {
+        width: min(96vw, 1600px);
+        max-width: none;
+        max-height: 84vh;
+        background: #111;
+        border-radius: 8px;
+      }
       input, button { margin-right: 8px; }
       #log { white-space: pre-wrap; font-size: 13px; background: #f5f5f5; padding: 10px; border-radius: 8px; }
     </style>
   </head>
   <body>
-    <h2>Week 1: Signaling + Basic WebRTC</h2>
-    <p>Open this page in two tabs with different peer IDs.</p>
+    <h2>Week 3: FFmpeg -> Rust -> WebRTC</h2>
+    <p>Connect and call <code>ffmpeg-bot</code> to receive desktop stream.</p>
 
     <label>Session: <input id="sessionId" value="demo-room" /></label>
     <label>Peer: <input id="peerId" value="" /></label>
     <button id="connectBtn">Connect</button>
-    <button id="callBtn" disabled>Call first remote peer</button>
+    <button id="callBtn" disabled>Call stream bot</button>
+    <button id="fullscreenBtn">Fullscreen</button>
 
     <div class="row">
-      <div>
-        <h4>Local</h4>
-        <video id="localVideo" autoplay muted playsinline></video>
-      </div>
       <div>
         <h4>Remote</h4>
         <video id="remoteVideo" autoplay playsinline></video>
@@ -37,15 +40,14 @@
 
     <script>
       const logEl = document.getElementById("log");
-      const localVideo = document.getElementById("localVideo");
       const remoteVideo = document.getElementById("remoteVideo");
       const connectBtn = document.getElementById("connectBtn");
       const callBtn = document.getElementById("callBtn");
+      const fullscreenBtn = document.getElementById("fullscreenBtn");
       const sessionInput = document.getElementById("sessionId");
       const peerInput = document.getElementById("peerId");
 
       let pc;
-      let localStream;
       let localPeerId;
       let currentSessionId;
       let pollTimer;
@@ -73,7 +75,9 @@
         pc.onicecandidate = (event) => {
           if (!event.candidate) return;
           if (knownPeers.size === 0) return;
-          const to = Array.from(knownPeers)[0];
+          const to = knownPeers.has("ffmpeg-bot")
+            ? "ffmpeg-bot"
+            : Array.from(knownPeers)[0];
           postSignal("/signal/ice_candidate", {
             type: "ice_candidate",
             from: localPeerId,
@@ -90,8 +94,7 @@
         pc.onconnectionstatechange = () => {
           log(`PeerConnection state: ${pc.connectionState}`);
         };
-
-        localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
+        pc.addTransceiver("video", { direction: "recvonly" });
       }
 
       function postSignal(endpoint, payload) {
@@ -150,7 +153,9 @@
       }
 
       async function startCall() {
-        const target = Array.from(knownPeers)[0];
+        const target = knownPeers.has("ffmpeg-bot")
+          ? "ffmpeg-bot"
+          : Array.from(knownPeers)[0];
         if (!target) {
           log("No remote peer found");
           return;
@@ -166,12 +171,6 @@
         log(`Offer sent to ${target}`);
       }
 
-      async function ensureLocalMedia() {
-        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-        localVideo.srcObject = localStream;
-        log("Local camera stream ready");
-      }
-
       connectBtn.onclick = async () => {
         try {
           connectBtn.disabled = true;
@@ -182,7 +181,6 @@
           peerInput.value = localPeerId;
           currentSessionId = sessionInput.value.trim() || "demo-room";
 
-          await ensureLocalMedia();
           await initPeerConnection();
 
           const joinResponse = await fetch(`/signal/join?session_id=${encodeURIComponent(currentSessionId)}&peer_id=${encodeURIComponent(localPeerId)}`, {
@@ -208,6 +206,18 @@
 
       callBtn.onclick = async () => {
         await startCall();
+      };
+
+      fullscreenBtn.onclick = async () => {
+        try {
+          if (document.fullscreenElement) {
+            await document.exitFullscreen();
+          } else {
+            await remoteVideo.requestFullscreen();
+          }
+        } catch (err) {
+          log(`Fullscreen failed: ${err.message}`);
+        }
       };
 
       window.addEventListener("beforeunload", () => {

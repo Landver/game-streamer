@@ -61,19 +61,25 @@ You can generate hardware-encoded H264 in real time.
 
 # Week 3 — Pipe FFmpeg Into WebRTC
 
-Two approaches:
+Primary target (chosen):
 
 Option A:
-- Spawn FFmpeg process
-- Pipe stdout into Rust
-- Feed into WebRTC video track
+- Spawn FFmpeg process from Rust
+- Pipe encoded output into Rust ingest loop
+- Feed data into WebRTC video track for browser playback
+
+Optional fallback (not in current Week 3 scope):
 
 Option B:
 - Use RTP output from FFmpeg
-- Let WebRTC consume RTP packets
+- Consume RTP packets before WebRTC sender path
 
 Deliverable:
 Browser displays stream powered by FFmpeg.
+
+Week 3 docs:
+- `docs/02_ffmpeg/week_3_ffmpeg_to_webrtc_pipe.md`
+- `docs/02_ffmpeg/week_3_smoke_test.md`
 
 ---
 

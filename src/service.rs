@@ -2,6 +2,7 @@ use axum::{http::StatusCode, Json};
 use tracing::{info, warn};
 
 use crate::{
+    media_bridge::MediaBridge,
     models::{ApiResponse, SessionPeerQuery, SignalMessage},
     state::{AppState, SessionState},
 };
@@ -19,6 +20,13 @@ pub async fn join_session(
         peer_id: query.peer_id.clone(),
     };
     enqueue_to_others(session, &query.peer_id, join_msg);
+    if query.peer_id != "ffmpeg-bot" {
+        if let Some(inbox) = session.inboxes.get_mut(&query.peer_id) {
+            inbox.push_back(SignalMessage::Join {
+                peer_id: "ffmpeg-bot".to_owned(),
+            });
+        }
+    }
 
     info!("join session={} peer={}", query.session_id, query.peer_id);
     api_ok()
@@ -52,6 +60,48 @@ pub async fn route_signal_message(
     query: SessionPeerQuery,
     msg: SignalMessage,
 ) -> (StatusCode, Json<ApiResponse>) {
+    if let SignalMessage::Offer { from, to, sdp } = &msg {
+        if MediaBridge::is_bot_target(to) {
+            return match state
+                .media_bridge
+                .handle_offer(
+                    state.clone(),
+                    query.session_id.clone(),
+                    from.clone(),
+                    sdp.clone(),
+                )
+                .await
+            {
+                Ok(()) => api_ok(),
+                Err(err) => {
+                    warn!("ffmpeg_bot offer failed session={} error={err}", query.session_id);
+                    api_error(StatusCode::BAD_REQUEST)
+                }
+            };
+        }
+    }
+
+    if let SignalMessage::IceCandidate {
+        from,
+        to,
+        candidate,
+    } = &msg
+    {
+        if MediaBridge::is_bot_target(to) {
+            return match state
+                .media_bridge
+                .handle_remote_ice(&query.session_id, from, candidate)
+                .await
+            {
+                Ok(()) => api_ok(),
+                Err(err) => {
+                    warn!("ffmpeg_bot ice failed session={} error={err}", query.session_id);
+                    api_error(StatusCode::BAD_REQUEST)
+                }
+            };
+        }
+    }
+
     let mut sessions = state.sessions.write().await;
     let Some(session) = sessions.get_mut(&query.session_id) else {
         return api_error(StatusCode::NOT_FOUND);
